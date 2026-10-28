@@ -33,7 +33,8 @@ import (
 	"go.gearno.de/kit/worker"
 	"go.probo.inc/probo/pkg/coredata"
 	"go.probo.inc/probo/pkg/gid"
-	"go.probo.inc/probo/pkg/task/sync/linear"
+	"go.probo.inc/probo/pkg/task/sync/lease"
+	linear "go.probo.inc/probo/pkg/task/sync/linear/client"
 )
 
 const (
@@ -138,6 +139,10 @@ func (h *outboundHandler) handle(ctx context.Context, item *coredata.TaskSyncJob
 	var payload JobPayload
 	if err := json.Unmarshal(item.Payload, &payload); err != nil {
 		return fmt.Errorf("cannot unmarshal task sync payload: %w", err)
+	}
+
+	if payload.Provider == coredata.ConnectorProviderAsana {
+		return h.handleAsana(ctx, item, payload)
 	}
 
 	scope := coredata.NewScopeFromObjectID(item.ID)
@@ -302,7 +307,7 @@ func (h *outboundHandler) processUpdate(
 			return fmt.Errorf("cannot embed Linear files: %w", embedErr)
 		}
 
-		dueDate := DeadlineToLinearDate(task.Deadline)
+		dueDate := DeadlineToDate(task.Deadline)
 
 		issue, err := client.UpdateIssue(
 			ctx,
@@ -619,8 +624,7 @@ func (h *outboundHandler) startHeartbeat(
 }
 
 func processingLeaseLost(ctx context.Context, err error) bool {
-	return errors.Is(err, coredata.ErrProcessingLeaseLost) ||
-		errors.Is(context.Cause(ctx), coredata.ErrProcessingLeaseLost)
+	return lease.ProcessingLeaseLost(ctx, err)
 }
 
 func loadCurrentOutboundLink(
@@ -682,9 +686,5 @@ func outboundRetryDelay(attemptCount int) time.Duration {
 }
 
 func outboundLeaseHeartbeatInterval(staleAfter, interval time.Duration) time.Duration {
-	if interval >= staleAfter {
-		return max(staleAfter/2, time.Millisecond)
-	}
-
-	return interval
+	return lease.OutboundLeaseHeartbeatInterval(staleAfter, interval)
 }

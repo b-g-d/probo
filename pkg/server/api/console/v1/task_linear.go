@@ -24,27 +24,58 @@ import (
 	"context"
 	"errors"
 
+	"github.com/vektah/gqlparser/v2/gqlerror"
 	"go.gearno.de/kit/log"
 	"go.probo.inc/probo/pkg/coredata"
 	"go.probo.inc/probo/pkg/server/gqlx"
 	tasksync "go.probo.inc/probo/pkg/task/sync"
 )
 
+const (
+	publishProviderAsana  = "ASANA"
+	publishProviderLinear = "LINEAR"
+)
+
 func (r *mutationResolver) linearPublishError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, coredata.ErrResourceNotFound):
-		return gqlx.NotFound(ctx, err)
+		return withPublishProvider(gqlx.NotFound(ctx, err), publishProviderLinear)
 	case errors.Is(err, tasksync.ErrLinearNotConnected),
 		errors.Is(err, tasksync.ErrLinearReconnectRequired),
 		errors.Is(err, tasksync.ErrLinearTeamIDRequired),
 		errors.Is(err, tasksync.ErrLinearTeamNotFound):
-		return gqlx.Invalid(ctx, err)
+		return withPublishProvider(gqlx.Invalid(ctx, err), publishProviderLinear)
 	case errors.Is(err, tasksync.ErrTaskAlreadyLinked),
 		errors.Is(err, coredata.ErrResourceAlreadyExists):
-		return gqlx.Conflict(ctx, err)
+		return withPublishProvider(gqlx.Conflict(ctx, err), publishProviderLinear)
 	default:
 		r.logger.ErrorCtx(ctx, "cannot publish task to Linear", log.Error(err))
 
-		return gqlx.Internal(ctx)
+		return withPublishProvider(gqlx.Internal(ctx), publishProviderLinear)
 	}
+}
+
+func withPublishProvider(err error, provider string) error {
+	switch typed := err.(type) {
+	case *gqlerror.Error:
+		setPublishProvider(typed, provider)
+	case gqlerror.List:
+		for _, item := range typed {
+			setPublishProvider(item, provider)
+		}
+	}
+
+	return err
+}
+
+func setPublishProvider(err *gqlerror.Error, provider string) {
+	if err == nil {
+		return
+	}
+
+	if err.Extensions == nil {
+		err.Extensions = map[string]any{}
+	}
+
+	err.Extensions["provider"] = provider
 }

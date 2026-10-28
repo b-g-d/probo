@@ -127,6 +127,190 @@ func TestRetentionHandlerDeletesExpiredLinearWebhookEvents(t *testing.T) {
 	require.Equal(t, []string{pending.DeliveryID, keptProcessed.DeliveryID}, remaining)
 }
 
+func TestRetentionHandlerDeletesExpiredAsanaWebhookEvents(t *testing.T) {
+	t.Parallel()
+
+	pgClient := test.PGClient(t)
+	now := time.Now().UTC().Round(time.Microsecond)
+	suffix := gid.New(gid.NewTenantID(), coredata.TaskSyncJobEntityType).String()
+	expiredProcessedAt := now.Add(-2 * time.Hour)
+	keptProcessedAt := now.Add(-30 * time.Minute)
+	expiredDeadLetteredAt := now.Add(-4 * time.Hour)
+	expiredHandshakeAt := now.Add(-2 * time.Hour)
+
+	expiredProcessed := coredata.NewAsanaWebhookEvent("expired-processed-"+suffix, []byte(`{}`))
+	expiredProcessed.ProcessedAt = &expiredProcessedAt
+	expiredProcessed.UpdatedAt = expiredProcessedAt
+
+	keptProcessed := coredata.NewAsanaWebhookEvent("kept-processed-"+suffix, []byte(`{}`))
+	keptProcessed.ProcessedAt = &keptProcessedAt
+	keptProcessed.UpdatedAt = keptProcessedAt
+
+	expiredDeadLetter := coredata.NewAsanaWebhookEvent("expired-dead-letter-"+suffix, []byte(`{}`))
+	expiredDeadLetter.DeadLetteredAt = &expiredDeadLetteredAt
+	expiredDeadLetter.UpdatedAt = expiredDeadLetteredAt
+
+	pending := coredata.NewAsanaWebhookEvent("pending-"+suffix, []byte(`{}`))
+
+	expiredHandshake := &coredata.AsanaWebhookHandshake{
+		Nonce:            "expired-handshake-" + suffix,
+		ConnectorID:      gid.New(gid.NewTenantID(), coredata.ConnectorEntityType),
+		SecretCiphertext: []byte{},
+		CreatedAt:        expiredHandshakeAt,
+	}
+	keptHandshake := &coredata.AsanaWebhookHandshake{
+		Nonce:            "kept-handshake-" + suffix,
+		ConnectorID:      gid.New(gid.NewTenantID(), coredata.ConnectorEntityType),
+		SecretCiphertext: []byte{},
+		CreatedAt:        keptProcessedAt,
+	}
+
+	require.NoError(
+		t,
+		pgClient.WithTx(
+			t.Context(),
+			func(ctx context.Context, tx pg.Tx) error {
+				for _, event := range []*coredata.AsanaWebhookEvent{
+					expiredProcessed,
+					keptProcessed,
+					expiredDeadLetter,
+					pending,
+				} {
+					if _, err := event.Insert(ctx, tx); err != nil {
+						return err
+					}
+				}
+
+				if err := expiredHandshake.Insert(ctx, tx); err != nil {
+					return err
+				}
+
+				return keptHandshake.Insert(ctx, tx)
+			},
+		),
+	)
+	t.Cleanup(
+		func() {
+			_ = pgClient.WithConn(
+				context.Background(),
+				func(ctx context.Context, conn pg.Querier) error {
+					_, err := conn.Exec(
+						ctx,
+						`DELETE FROM asana_webhook_events
+						WHERE delivery_id IN (
+							@pending,
+							@kept,
+							@expired_processed,
+							@expired_dead
+						)`,
+						pgx.StrictNamedArgs{
+							"pending":           pending.DeliveryID,
+							"kept":              keptProcessed.DeliveryID,
+							"expired_processed": expiredProcessed.DeliveryID,
+							"expired_dead":      expiredDeadLetter.DeliveryID,
+						},
+					)
+					if err != nil {
+						return err
+					}
+
+					_, err = conn.Exec(
+						ctx,
+						`DELETE FROM asana_webhook_handshakes WHERE nonce = @expired OR nonce = @kept`,
+						pgx.StrictNamedArgs{
+							"expired": expiredHandshake.Nonce,
+							"kept":    keptHandshake.Nonce,
+						},
+					)
+
+					return err
+				},
+			)
+		},
+	)
+
+	h := &retentionHandler{
+		pg:                  pgClient,
+		logger:              log.NewLogger(log.WithOutput(io.Discard)),
+		retention:           time.Hour,
+		deadLetterRetention: 3 * time.Hour,
+		batchSize:           1000,
+		now:                 func() time.Time { return now },
+	}
+	require.NoError(t, h.Run(t.Context()))
+
+	var remaining []string
+
+	require.NoError(
+		t,
+		pgClient.WithConn(
+			t.Context(),
+			func(ctx context.Context, conn pg.Querier) error {
+				rows, err := conn.Query(
+					ctx,
+					`SELECT delivery_id
+					FROM asana_webhook_events
+					WHERE delivery_id IN (
+						@expired_processed,
+						@kept_processed,
+						@expired_dead_letter,
+						@pending
+					)
+					ORDER BY delivery_id`,
+					pgx.StrictNamedArgs{
+						"expired_processed":   expiredProcessed.DeliveryID,
+						"kept_processed":      keptProcessed.DeliveryID,
+						"expired_dead_letter": expiredDeadLetter.DeliveryID,
+						"pending":             pending.DeliveryID,
+					},
+				)
+				if err != nil {
+					return err
+				}
+
+				remaining, err = pgx.CollectRows(rows, pgx.RowTo[string])
+
+				return err
+			},
+		),
+	)
+	require.Equal(
+		t,
+		[]string{keptProcessed.DeliveryID, pending.DeliveryID},
+		remaining,
+	)
+
+	var handshakes []string
+
+	require.NoError(
+		t,
+		pgClient.WithConn(
+			t.Context(),
+			func(ctx context.Context, conn pg.Querier) error {
+				rows, err := conn.Query(
+					ctx,
+					`SELECT nonce
+					FROM asana_webhook_handshakes
+					WHERE nonce IN (@expired, @kept)
+					ORDER BY nonce`,
+					pgx.StrictNamedArgs{
+						"expired": expiredHandshake.Nonce,
+						"kept":    keptHandshake.Nonce,
+					},
+				)
+				if err != nil {
+					return err
+				}
+
+				handshakes, err = pgx.CollectRows(rows, pgx.RowTo[string])
+
+				return err
+			},
+		),
+	)
+	require.Equal(t, []string{keptHandshake.Nonce}, handshakes)
+}
+
 func TestRetentionHandlerDeletesExpiredTaskSyncJobs(t *testing.T) {
 	t.Parallel()
 

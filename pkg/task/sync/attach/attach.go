@@ -1,0 +1,66 @@
+// Copyright (c) 2026 Probo Inc <hello@probo.com>.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Package attach is the file payload shared by Linear and Asana sync.
+package attach
+
+import (
+	"context"
+
+	"go.probo.inc/probo/pkg/coredata"
+	"go.probo.inc/probo/pkg/gid"
+)
+
+type (
+	// Attachment is the bytes of a rich-text image or attachment.
+	Attachment struct {
+		Name     string
+		MimeType string
+		Body     []byte
+	}
+
+	// Reader loads a stored attachment for upload to an external tracker.
+	Reader interface {
+		ReadAttachment(
+			ctx context.Context,
+			scope coredata.Scoper,
+			organizationID gid.GID,
+			fileID gid.GID,
+		) (Attachment, error)
+	}
+
+	// Stored is a file saved from an external upload.
+	Stored struct {
+		ID       gid.GID
+		Name     string
+		MimeType string
+		Size     int64
+	}
+
+	// Writer stores an external upload as a private organization file.
+	Writer interface {
+		StoreAttachment(
+			ctx context.Context,
+			scope coredata.Scoper,
+			organizationID gid.GID,
+			file Attachment,
+		) (Stored, error)
+	}
+)
